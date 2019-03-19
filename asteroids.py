@@ -1,11 +1,11 @@
 # asteroids.py                                                        Scott Simmons Spring 2015
 #
-# Copyright 2015 Scott Simmons 
+# Copyright 2015 Scott Simmons
 #
 import pygame, sys
 from pygame.locals import *
 from random import randint
-from math import sin, cos, pi, atan
+from math import sin, cos, pi
 
 '''
 KNOWN ISSUES:
@@ -14,7 +14,7 @@ KNOWN ISSUES:
 
   - the rocks may only start out traveling in a small number of directions.  Does that matter?
 
-  - check to see if objects are being deleted correctly, like bullets.
+  - check to see if objects (like bullets) are being deleted correctly.
 
   - did not finish making the rocks look good.
 
@@ -22,8 +22,8 @@ KNOWN ISSUES:
 
 NUM_ROCKS = 3  # number of rocks at beginning of game
 
-WIDTH = 900    
-HEIGHT = 700 
+WIDTH = 900
+HEIGHT = 700
 
 winWidth = WIDTH + 1
 winHeight = HEIGHT + 1
@@ -36,10 +36,12 @@ BLACK = (0, 0, 0)
 BLUE = (100,149,237)
 RED = (220,20,60)
 
-'''create the correct topological space
-   t_x = -1 half twists while gluing along the x-axis; likewise for t_y
-'''
 class Space:
+  """
+  Create the correct topological space.
+
+  t_x = -1 half twists while gluing along the x-axis; likewise for t_y
+  """
   t_x = 1  #class variables
   t_y = 1
 
@@ -60,9 +62,9 @@ class Space:
       self.x = (Space.t_x * x) % winWidth
     else:
       self.x = x % winWidth
-    if self.refl_x: 
+    if self.refl_x:
       self.flipped_x =  (self.flipped_x + 1) % 2
-    if self.refl_y: 
+    if self.refl_y:
       self.flipped_y =  (self.flipped_y + 1) % 2
     self.flipped = (self.flipped_x + self.flipped_y) % 2
 
@@ -71,25 +73,26 @@ class Space:
     cls.t_x = t_x
     cls.t_y = t_y
 
-'''
- This class adds some functionality to Pygame's built-in Sprite class.  Mainly, MySprite 
- instances can draw themselves to a surface such as a torus, and can be animated. 
-        
- - images must be a dictionary such as 
-        
-      { 0 : 'image.png', 1 : 'image.png' } or  { 'left': 'shipleft.png', etc } 
-
-   or { 0 : 'image.png' } for a static sprite
-        
- - an instance of MySprite moves, each game loop, the length and direction of the vector
-   <dx, dy> and is oriented (rotated) according to theta.  It is drawn with center at (x,y). 
-
- - it's best if all the images are the same size
-
- - when extending this class, make sure to call update_position() before draw()
-'''
 class MySprite(pygame.sprite.Sprite):
-  def __init__(self, screen, images, x, y, theta, dx, dy, d_theta):  
+  """
+   This class adds some functionality to Pygame's built-in Sprite class.  Mainly, MySprite
+   instances can draw themselves to a surface such as a torus (or a Klein bottle, or 
+   projective plane, as the case may be, and can be animated.
+
+   - images must be a dictionary such as
+
+        { 0 : 'image.png', 1 : 'image.png' } or  { 'left': 'shipleft.png', etc }
+
+     or { 0 : 'image.png' } for a static sprite
+
+   - an instance of MySprite moves, each game loop, the length and direction of the vector
+     <dx, dy> and is oriented (rotated) according to theta.  It is drawn with center at (x,y).
+
+   - it's best if all the images are the same size
+
+   - when extending this class, make sure to call update_position() before draw()
+  """
+  def __init__(self, screen, images, x, y, theta, dx, dy, d_theta):
     super().__init__()
     self.screen = screen
     self._images = images
@@ -102,13 +105,13 @@ class MySprite(pygame.sprite.Sprite):
   def draw(self, key):
     rotImage = pygame.transform.rotate(self._images[key], self._theta) # rotate the image
     rotRectCenter = rotImage.get_rect().center  # the center of the bounding box for the rotated image
-    rotRectWidth  = rotImage.get_rect().width   #   Unless the rotation angle is quadrantal, this bounding 
+    rotRectWidth  = rotImage.get_rect().width   #   Unless the rotation angle is quadrantal, this bounding
     rotRectHeight = rotImage.get_rect().height  #   box will be larger that the original bounding box
 
-    rot_x = (self.p.x - rotRectCenter[0])  # With these upper_left coordinates 
-    rot_y = (self.p.y - rotRectCenter[1])  # the center of the image is preserved 
+    rot_x = (self.p.x - rotRectCenter[0])  # With these upper_left coordinates
+    rot_y = (self.p.y - rotRectCenter[1])  # the center of the image is preserved
 
-    self.screen.blit(rotImage, (rot_x, rot_y))  
+    self.screen.blit(rotImage, (rot_x, rot_y))
 
     temp = rotImage
     if self.p.x > winWidth - rotRectCenter[0]:  # the right edge
@@ -138,54 +141,54 @@ class MySprite(pygame.sprite.Sprite):
                                                                        (0, 0, rotRectHeight, - rot_y))
     rotImage = temp
 
-    # Now the corners 
-    if self.p.x < rotRectCenter[0] and self.p.y < rotRectCenter[1]:  # top left 
+    # Now the corners
+    if self.p.x < rotRectCenter[0] and self.p.y < rotRectCenter[1]:  # top left
       pp = Space(rot_x, rot_y)
       if Space.t_x == Space.t_y == 1: # torus
         self.screen.blit(rotImage, (pp.x, pp.y), (0, 0, -rot_x, -rot_y))
-      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle 
+      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, False, True)
         self.screen.blit(flipImage, (pp.x, 0), (0, rotRectHeight + rot_y, -rot_x, -rot_y))
-      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle 
+      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, True, False)
         self.screen.blit(flipImage, (0, pp.y), (rotRectWidth + rot_x, 0, -rot_x, -rot_y))
-    
-    elif self.p.x < rotRectCenter[0] and self.p.y > winHeight - rotRectCenter[1]:  # bottom left 
+
+    elif self.p.x < rotRectCenter[0] and self.p.y > winHeight - rotRectCenter[1]:  # bottom left
       pp = Space(rot_x, rot_y + rotRectHeight)
       if Space.t_x == Space.t_y == 1: # torus
         self.screen.blit(rotImage, (pp.x, 0), (0, winHeight - rot_y, -rot_x, rot_y + rotRectHeight - winHeight))
-      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle 
+      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, False, True)
         self.screen.blit(flipImage, (pp.x, pp.y), (0, 0, - rot_x, -rot_y))
-      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle 
+      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, True, False)
         self.screen.blit(flipImage, (0, 0), (rotRectWidth + rot_x,\
                                      winHeight - rot_y,  - rot_x, rot_y +rotRectHeight - winHeight))
 
-    elif self.p.x > winWidth - rotRectCenter[0] and self.p.y > winHeight - rotRectCenter[1]:  # bottom right 
+    elif self.p.x > winWidth - rotRectCenter[0] and self.p.y > winHeight - rotRectCenter[1]:  # bottom right
       pp = Space(rot_x + rotRectWidth, rot_y + rotRectHeight)
       if Space.t_x == Space.t_y == 1: # torus
         self.screen.blit(rotImage, (0,0),\
           (winWidth - rot_x, winHeight - rot_y, rot_x + rotRectWidth - winWidth, rot_y + rotRectHeight - winHeight))
-      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle 
+      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, False, True)
         self.screen.blit(flipImage, (0, pp.y), (winWidth - rot_x, 0,\
                                              rot_x + rotRectWidth - winWidth, rot_y + rotRectHeight - winHeight))
-      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle 
+      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, True, False)
         self.screen.blit(flipImage, (pp.x, 0), (0, winHeight - rot_y,\
                                              rot_x + rotRectWidth - winWidth, rot_y + rotRectHeight - winHeight))
 
-    elif self.p.x > winWidth - rotRectCenter[0] and self.p.y < rotRectCenter[1]:  # top right 
+    elif self.p.x > winWidth - rotRectCenter[0] and self.p.y < rotRectCenter[1]:  # top right
       pp = Space(rot_x + rotRectWidth, rot_y)
       if Space.t_x == Space.t_y == 1: # torus
         self.screen.blit(rotImage, (0, pp.y), (winWidth - rot_x, 0,\
                                                rot_x + rotRectWidth - winWidth, -rot_y))
-      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle 
+      if Space.t_x == 1 and  Space.t_y == -1: # 1, -1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, False, True)
         self.screen.blit(flipImage, (0, 0), (winWidth - rot_x, \
                                                rotRectHeight + rot_y, rot_x + rotRectWidth - winWidth, - rot_y))
-      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle 
+      if Space.t_x == -1 and  Space.t_y == 1: # -1, 1 Klein bottle
         flipImage = pygame.transform.flip(rotImage, True, False)
         self.screen.blit(flipImage, (pp.x, pp.y), (0, 0,\
                                                rot_x + rotRectWidth - winWidth,  - rot_y))
@@ -194,26 +197,26 @@ class MySprite(pygame.sprite.Sprite):
     self.p.set_coords(self.p.x + self.dx, self.p.y + self.dy)
     if self.p.refl_x:
       self.dy = -self.dy
-      self._theta = 180 - self._theta 
+      self._theta = 180 - self._theta
       self.d_theta = - self.d_theta
       self.p.refl_x = False
     if self.p.refl_y:
       self.dx = -self.dx
-      self._theta = - self._theta 
+      self._theta = - self._theta
       self.d_theta = - self.d_theta
       self.p.refl_y = False
     self._theta += self.d_theta
-    self.rect.center = self.p.x, self.p.y 
+    self.rect.center = self.p.x, self.p.y
 
 class Ship(MySprite):  # This class extends the MySprite class defined above
   def __init__(self, screen, x = winWidth/2, y = winHeight/2, theta = 0, dx = 0, dy = 0,\
-                                                                         d_theta = 0, accel = .02): 
+                                                                         d_theta = 0, accel = .02):
     self.accel = accel
-    images = {} 
-    images['off'] = pygame.image.load('spaceShip2.png') 
-    images['right'] = pygame.image.load('spaceShip2right.png') 
+    images = {}
+    images['off'] = pygame.image.load('spaceShip2.png')
+    images['right'] = pygame.image.load('spaceShip2right.png')
     images['left'] = pygame.transform.flip(images['right'],True,False)
-    images['both'] = pygame.image.load('spaceShip2thrust.png') 
+    images['both'] = pygame.image.load('spaceShip2thrust.png')
     super().__init__(screen, images, x, y, theta, dx, dy, d_theta)
 
   def update(self, thrust, left, right):
@@ -223,24 +226,24 @@ class Ship(MySprite):  # This class extends the MySprite class defined above
     engines = 'off'
     if thrust:
       engines = 'both'
-      self.dx +=  self.accel * self._theta_dx 
+      self.dx +=  self.accel * self._theta_dx
       self.dy +=  self.accel * self._theta_dy
     if right:
-      self.d_theta = -1.5 
-      engines = 'left' if self.p.flipped else 'right' 
+      self.d_theta = -1.5
+      engines = 'left' if self.p.flipped else 'right'
     elif left:
-      self.d_theta = 1.5 
-      engines = 'right' if self.p.flipped else 'left' 
+      self.d_theta = 1.5
+      engines = 'right' if self.p.flipped else 'left'
     if self.p.flipped:
       self.d_theta = - self.d_theta
-      
+
     self.update_position()
     self.draw(engines)
 
-class Bullet(MySprite): 
+class Bullet(MySprite):
   def __init__(self, screen, ship, bullets, speed = 5, distance = 6*winHeight/7):
     self.speed = speed  # distance travelled by the bullet per game loop
-    self.distance = distance # distance the bullet travels before disappearing  
+    self.distance = distance # distance the bullet travels before disappearing
     self.min_dist = ship.rect.width/2
   #  x = ship.p.x-ship.rect[2]/2*sin(ship._theta*pi/180)
   #  y = ship.p.y-ship.rect[3]/2*cos(ship._theta*pi/180)
@@ -249,15 +252,15 @@ class Bullet(MySprite):
     dx = speed *  ship._theta_dx + ship.d_theta * ship._theta_dy  + ship.dx
     dy = speed *  ship._theta_dy - ship.d_theta * ship._theta_dx  + ship.dy
     radius = 5  # size of the bullet
-    theta = ship._theta  
+    theta = ship._theta
     image = pygame.Surface([ 2*radius, 2*radius], pygame.SRCALPHA, 32)
     image.fill((255,255,255,0))
-    self.rect = image.get_rect() 
+    self.rect = image.get_rect()
     pygame.draw.circle(image, (0,0,0), (radius, radius), radius)
     super().__init__(screen, {0:image}, x, y, theta, dx, dy, 0)
     bullets.add(self)
     self.distance_travelled = 0
-     
+
   def update(self, bullets, rocks):
     rock = pygame.sprite.spritecollideany(self, rocks, pygame.sprite.collide_circle)
     if rock != None:
@@ -266,7 +269,7 @@ class Bullet(MySprite):
       rock.destroy(rock.p.x, rock.p.y)
       del self
     else:
-      self.distance_travelled += self.speed 
+      self.distance_travelled += self.speed
       if self.distance_travelled <= self.distance:
         self.update_position()
         if self.distance_travelled >= self.min_dist:
@@ -279,30 +282,30 @@ class Rock(MySprite):
   def __init__(self, screen, images, group, radius, x, y, dx, dy, d_theta):
     self.group = group
     theta = randint(0,359)
- #   d_theta = .5*d_theta 
-    super().__init__(screen, images, x, y, theta, dx, dy, d_theta)  
-    group.add(self) 
-    
+ #   d_theta = .5*d_theta
+    super().__init__(screen, images, x, y, theta, dx, dy, d_theta)
+    group.add(self)
+
   def update(self):
     self.update_position()
     self.draw(0)
-    
-class BigRock(Rock): 
-  def __init__(self, screen, group, slow = .2, radius = 50): 
+
+class BigRock(Rock):
+  def __init__(self, screen, group, slow = .2, radius = 50):
     if randint(0,1):
-      x = randint(-int(winWidth/20),int(winWidth/20))  
+      x = randint(-int(winWidth/20),int(winWidth/20))
       y = randint(0,winHeight)
     else:
-      x = randint(0,winWidth)  
+      x = randint(0,winWidth)
       y = randint(-int(winWidth/20),int(winHeight/20))
     d_theta = randint(-2,2)
     dx = dy = 0
-    while dx == 0 and dy == 0: 
+    while dx == 0 and dy == 0:
       dx = randint(-3,3)
       dy = randint(-3,3)
     dx = slow * dx
     dy = slow * dy
-    
+
     image = pygame.Surface([2*radius, 2*radius], pygame.SRCALPHA, 32)
     image.fill((255,255,255,0))
     pygame.draw.polygon(image, GREY, [[91,80],[81,75],[80,96],[35,100],[40,92],[5,81],\
@@ -320,21 +323,21 @@ class BigRock(Rock):
       self.draw(1)
     else:
       self.draw(0)
- 
+
   def destroy(self, x, y):
     Score.add(5)
     MediumRock(self.screen, self.group, x, y)
     MediumRock(self.screen, self.group, x, y)
-    
+
 class MediumRock(Rock):
-  def __init__(self, screen, group, x, y, slow = .2, radius = 30): 
+  def __init__(self, screen, group, x, y, slow = .2, radius = 30):
     d_theta = randint(-3,3)
     dx = dy = 0
-    while dx == 0 and dy == 0: 
+    while dx == 0 and dy == 0:
       dx = randint(-4,4)
       dy = randint(-4,4)
     dx, dy = slow * dx, slow * dy
-    
+
     image = pygame.Surface([2*radius, 2*radius], pygame.SRCALPHA, 32)
     image.fill((255,255,255,0))
     pygame.draw.polygon(image, GREY, [[60,0],[60,60],[0,60],[0,0],[60,0]],8)
@@ -348,14 +351,14 @@ class MediumRock(Rock):
     SmallRock(self.screen, self.group, x, y)
 
 class SmallRock(Rock):
-  def __init__(self, screen, group, x, y, slow = .2, radius = 15): 
+  def __init__(self, screen, group, x, y, slow = .2, radius = 15):
     d_theta = randint(-4,4)
     dx = dy = 0
-    while dx == 0 and dy == 0: 
+    while dx == 0 and dy == 0:
       dx = randint(-6,6)
       dy = randint(-6,6)
     dx, dy = slow * dx, slow * dy
-    
+
     image = pygame.Surface([2*radius, 2*radius], pygame.SRCALPHA, 32)
     image.fill((255,255,255,0))
     pygame.draw.polygon(image, GREY, [[30,0],[30,30],[0,30],[0,0],[30,0]],8)
@@ -364,11 +367,11 @@ class SmallRock(Rock):
     super().__init__(screen, {0:image}, group, radius, x, y, dx, dy, d_theta)
 
   def destroy(self, x, y):
-    Score.add(20) 
+    Score.add(20)
 
 def textBlit(screen, string, font, font_size, color, loc_string, loc_x, loc_y, antialias = True):
     _font = pygame.font.SysFont(font, font_size)
-    surf = _font.render(string, antialias, color) 
+    surf = _font.render(string, antialias, color)
     surfRect = surf.get_rect()
     if loc_string == 'center':
       surfRect.center = loc_x, loc_y
@@ -378,16 +381,16 @@ def textBlit(screen, string, font, font_size, color, loc_string, loc_x, loc_y, a
       surfRect.bottomleft = loc_x, loc_y
     screen.blit(surf, surfRect)
 
-class Score: 
-  score = 0   
-  lives = 1 
-  
+class Score:
+  score = 0
+  lives = 1
+
   @classmethod
   def draw(cls, screen, rocks):
     textBlit(screen,"Lives: "+str(cls.lives),"Arial",35,RED,"topleft",winWidth/20,winHeight/20,False)
     textBlit(screen,"Score: "+str(cls.score),"Arial",35,RED,"topleft",4*winWidth/20,winHeight/20,False)
     textBlit(screen,"Rocks: "+str(len(rocks)),"Arial",35,RED,"bottomleft",winWidth/20,19*winHeight/20,False)
-    
+
   @classmethod
   def add(cls, amount):
     cls.score += amount
@@ -420,35 +423,35 @@ class Fader():
     self.frames_max = 420
     assert self.frames_max <= 510, "self.frames_max should probably be less than 510"
     self.frames = self.frames_max  # frames left counting down from self.frames_max
-    self.max_font_size = 60 # max font size               
-    self.font_size = self.max_font_size               
+    self.max_font_size = 60 # max font size
+    self.font_size = self.max_font_size
 
-  # does not stop game play 
+  # does not stop game play
   def lifeBonus(self):
     # Shrinks to nothing
     #font = pygame.font.Font(None, self.font_size)
-    #surf = font.render("BONUS LIFE!",True,RED) 
+    #surf = font.render("BONUS LIFE!",True,RED)
 
     # Fades from red to white
     #font = pygame.font.Font(None, self.max_font_size)
     font = pygame.font.SysFont('Arial', self.max_font_size)
-    color = 0 if self.frames > 255 else 255 - self.frames # color stays at zero for while 
+    color = 0 if self.frames > 255 else 255 - self.frames # color stays at zero for while
     if color < 220:                                       # and then counts up to 255
-      surf = font.render("BONUS LIFE!",True,(220, color,color)) 
+      surf = font.render("BONUS LIFE!",True,(220, color,color))
     else:
-      surf = font.render("BONUS LIFE!",True,(color, color,color)) 
+      surf = font.render("BONUS LIFE!",True,(color, color,color))
 
     # Fades from blue to white
     font = pygame.font.SysFont('Arial', self.max_font_size)
     color = 100 if self.frames > 255 else 255 - self.frames
     if  color < 100 :
-      surf = font.render("BONUS LIFE!",True,(100, 149, 237)) 
+      surf = font.render("BONUS LIFE!",True,(100, 149, 237))
     elif  color < 149 :
-      surf = font.render("BONUS LIFE!",True,(color, 149, 237)) 
+      surf = font.render("BONUS LIFE!",True,(color, 149, 237))
     elif color < 237:
-      surf = font.render("BONUS LIFE!",True,(color, color, 237)) 
+      surf = font.render("BONUS LIFE!",True,(color, color, 237))
     else:
-      surf = font.render("BONUS LIFE!",True,(color, color, color)) 
+      surf = font.render("BONUS LIFE!",True,(color, color, color))
 
     surfRect = surf.get_rect()
     surfRect.center = (winWidth/2,winHeight/3)
@@ -459,10 +462,10 @@ class Fader():
     if self.frames == 300:
       Score.addLife()
 
-  # stops game play 
+  # stops game play
   def shipDestroyed(self, frozenSurf):
     font = pygame.font.SysFont('Arial', self.font_size)
-    surf = font.render("SHIP DESTROYED!",True,BLUE) 
+    surf = font.render("SHIP DESTROYED!",True,BLUE)
     surfRect = surf.get_rect()
     surfRect.center = (winWidth/2,.3*winHeight)
     self.screen.blit(frozenSurf,(0,0,winWidth,winHeight))
@@ -472,13 +475,13 @@ class Fader():
     self.frames -= 1
 
   # helper method for ship Destroyed
-  def use_a_life(self):  
+  def use_a_life(self):
     Score.delLife()
     while self.frames > 0:
       if self.is_max():
         freezeScreen = self.screen.subsurface(pygame.Rect(0,0,WIDTH,HEIGHT)).copy()
         self.shipDestroyed(freezeScreen)
-      else: 
+      else:
         self.shipDestroyed(freezeScreen)
       pygame.display.update()
       fpsClock.tick(FPS)
@@ -494,7 +497,7 @@ class Fader():
     global Space
     infoSurf = self.info_blit(False, True)
     starting_up = True
-    run = True 
+    run = True
     ship = Ship(self.screen)
     bullets = pygame.sprite.Group() # set up some groups
     rocks = pygame.sprite.Group()
@@ -512,39 +515,39 @@ class Fader():
           if event.key == K_b:
             burst.shoot = True
           elif event.key == K_p:
-            print('ship is at',ship.p.x,ship.p.y) 
+            print('ship is at',ship.p.x,ship.p.y)
         elif event.type == KEYUP:
           if event.key == K_1:
-            Space.set_space(1,1) 
+            Space.set_space(1,1)
             del ship
             ship = Ship(self.screen)
           elif event.key == K_2:
-            Space.set_space(1,-1) 
+            Space.set_space(1,-1)
             infoSurf = self.info_blit(False, True)
             del ship
             ship = Ship(self.screen)
           elif event.key == K_3:
-            Space.set_space(-1,1) 
+            Space.set_space(-1,1)
             infoSurf = self.info_blit(False, True)
             del ship
             ship = Ship(self.screen)
           elif event.key == K_4:
-            Space.set_space(-1,-1) 
+            Space.set_space(-1,-1)
             infoSurf = self.info_blit(False, True)
             del ship
             ship = Ship(self.screen)
           elif event.key == K_c:
-            run = False 
+            run = False
           elif event.key == K_SPACE:
             Bullet(self.screen, ship, bullets)
       thrust = left = right =  False
-      keys = pygame.key.get_pressed() 
+      keys = pygame.key.get_pressed()
       if keys[K_UP]:
         thrust = True
       if keys[K_LEFT]:
         left = True
       if keys[K_RIGHT]:
-        right = True 
+        right = True
       if keys[K_DOWN]:
         ship.dx = ship.dy = 0
 
@@ -554,8 +557,8 @@ class Fader():
         self.title_banner()
       else:
         starting_up = False
-      
-      if not starting_up: 
+
+      if not starting_up:
         self.screen.blit(infoSurf,(0,0,winWidth,winHeight))
 
       ship.update(thrust, left, right)
@@ -579,7 +582,7 @@ class Fader():
     bullets.empty()
     rocks.empty()
     del ship
-    
+
   def info_blit(self, pause = False, screen_shot = False):
     if screen_shot:
       self.screen.fill(WHITE)
@@ -622,7 +625,7 @@ class Fader():
     while paused:
       for event in pygame.event.get():
         if event.type == QUIT or (event.type == KEYUP and event.key == K_q):
-          pygame.quit() 
+          pygame.quit()
           sys.exit()
         elif event.type == KEYUP and event.key == K_SPACE:
           return False
@@ -632,14 +635,14 @@ class Fader():
 
   def reset(self):
     self.frames = self.frames_max
-    self.font_size = self.max_font_size 
+    self.font_size = self.max_font_size
 
   def is_max(self):
     if self.frames == self.frames_max:
       return True
     else:
       return False
- 
+
   def lose(self):
 
     textBlit(self.screen,"No lives left!","Arial",80,BLUE,"center",winWidth/2,winHeight/3)
@@ -651,7 +654,7 @@ class Fader():
     while paused:
       for event in pygame.event.get():
         if event.type == QUIT or (event.type == KEYUP and event.key == K_q):
-          pygame.quit() 
+          pygame.quit()
           sys.exit()
         elif event.type == KEYUP and event.key == K_r:
           paused = False
@@ -664,13 +667,13 @@ class Burst():
   def __init__(self, num = 5, delay = 20, shoot = False):
     self.num = num
     self.delay = delay
-    self.shoot = shoot 
+    self.shoot = shoot
     self.frame = self.num * self.delay
 
-  def decriment(self):  
-    self.frame -= 1 
+  def decriment(self):
+    self.frame -= 1
 
-  def reset(self):  
+  def reset(self):
     self.frame = self.num * self.delay
     self.shoot = False
 
@@ -691,7 +694,7 @@ def main():
   ship = Ship(screen)  # create a Ship
 
   # set up some groups
-  bullets = pygame.sprite.Group() 
+  bullets = pygame.sprite.Group()
   rocks = pygame.sprite.Group()
 
   burst = Burst() # rapid fire
@@ -719,19 +722,19 @@ def main():
           pygame.quit()
           sys.exit()
         if event.key == K_p:
-          pause = True 
+          pause = True
     thrust = left = right =  False
-    keys = pygame.key.get_pressed() 
+    keys = pygame.key.get_pressed()
     if keys[K_UP]:
       thrust = True
     if keys[K_LEFT]:
       left = True
     if keys[K_RIGHT]:
-      right = True 
+      right = True
 
     screen.fill(WHITE)
- 
-    ship.update(thrust, left, right) 
+
+    ship.update(thrust, left, right)
 
     if burst.shoot:
       if  burst.frame > 0:
@@ -754,20 +757,20 @@ def main():
         Score.reset()
       delete_these = []
       for bullet in bullets:
-        delete_these.append(bullet) 
+        delete_these.append(bullet)
       bullets.empty()
       for bullet in delete_these:
-        del bullet 
+        del bullet
       bullets.empty()
       rocks.empty()
       del ship
       pygame.event.clear()
       ship = Ship(screen)
-      while len(rocks) < num_rocks:  
+      while len(rocks) < num_rocks:
         BigRock(screen, rocks)
 
     Score.draw(screen, rocks)
- 
+
     if len(rocks) == 0:
       if fader.frames > 0:
         fader.lifeBonus()
@@ -775,13 +778,13 @@ def main():
         fader.reset()
         delete_these = []
         for bullet in bullets:
-          delete_these.append(bullet) 
+          delete_these.append(bullet)
         bullets.empty()
         for bullet in delete_these:
-          del bullet 
+          del bullet
         pygame.event.clear()
         num_rocks += 1
-        while len(rocks) < num_rocks:  
+        while len(rocks) < num_rocks:
           BigRock(screen, rocks)
 
     if pause:
