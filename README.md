@@ -1,7 +1,4 @@
 # asteroids
-... on a torus, Klein bottle, or projective plane.
-
----
 
 This version of the classic game, Asteroids, was largely live-coded for a game design course taught in Shanghai in Spring
 2015.  The students in that course had varying degrees of coding experience.  The game runs in Python3 using
@@ -18,9 +15,19 @@ Notes:
 * Some students were concerned about wearing out their space bar.  Hit 'b' for a burst of bullets.
 * Obviously the game isn't finished.  Issue a pull request if you work on it!
 
----
+### Running in Debian-like Linux
 
-### Detailed notes for installing this on Windows 10.
+```console
+user@host:~$ sudo apt install python3-pygame
+user@host:~$ git clone https://github.com/sj-simmons/asteroids
+user@host:~$ cd asteroids
+user@host:~$ python3 asteroids.py
+```
+
+### Detailed notes for running this in Windows 10
+
+... using natively installed Python3; alternatively, you could also
+run this in the [Windows Subsystem for Linux](https://docs.microsoft.com/en-us/windows/wsl/) (if you install an X-xserver).
 
 #### First install Python3:
 
