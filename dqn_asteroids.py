@@ -85,8 +85,6 @@ class SimShip:
         if thrust:
             self.dx += self.accel * dt * -sin(self.theta * pi / 180)
             self.dy += self.accel * dt * -cos(self.theta * pi / 180)
-        self.dx *= SHIP_FRICTION
-        self.dy *= SHIP_FRICTION
         self.theta += self.d_theta * dt
         self.x = (self.x + self.dx * dt) % winWidth
         self.y = (self.y + self.dy * dt) % winHeight
@@ -184,7 +182,6 @@ ACTIONS = [
 ]
 
 SHIP_RADIUS = 18
-SHIP_FRICTION = 0.99        # velocity decay per physics step; gives terminal speed ≈5 px/frame
 SIM_STEPS_PER_ACTION = 4
 
 # ---------------------------------------------------------------------------
@@ -204,7 +201,7 @@ LR = 1e-4
 BATCH_SIZE = 256
 REPLAY_SIZE = 400_000
 TARGET_TAU = 0.005          # Polyak soft-update rate for target network
-GRAD_STEPS_PER_ENV = 1      # gradient updates per environment step (transformer step ~3.5x MLP)
+GRAD_STEPS_PER_ENV = 2      # gradient updates per environment step (transformer needs ~2x MLP sample budget)
 GRAD_CLIP = 1.0             # max gradient norm
 EPS_START = 1.0
 EPS_END = 0.10
@@ -229,32 +226,9 @@ N_STEPS = 10
 _DIAG = sqrt((winWidth / 2) ** 2 + (winHeight / 2) ** 2)
 
 
-def build_observation(ship, rocks, bullets, shoot_cooldown=0):
-    """Convert sim state to a fixed-size numpy float32 vector."""
-    obs = np.zeros(STATE_DIM, dtype=np.float32)
-    idx = 0
-
-    fwd_x = -sin(ship.theta * pi / 180)
-    fwd_y = -cos(ship.theta * pi / 180)
-
-    # Ship features (10)
-    obs[idx]     = ship.x / winWidth - 0.5
-    obs[idx + 1] = ship.y / winHeight - 0.5
-    speed = sqrt(ship.dx ** 2 + ship.dy ** 2)
-    obs[idx + 2] = float(np.tanh(ship.dx / 5.0))
-    obs[idx + 3] = float(np.tanh(ship.dy / 5.0))
-    obs[idx + 4] = float(np.tanh(speed / 5.0))
-    obs[idx + 5] = sin(ship.theta * pi / 180)
-    obs[idx + 6] = cos(ship.theta * pi / 180)
-    obs[idx + 7] = min(len(rocks), MAX_ROCKS) / MAX_ROCKS
-    obs[idx + 8] = max(0.0, shoot_cooldown) / 15.0   # shoot cooldown fraction (0=ready, 1=just fired)
-    obs[idx + 9] = len(bullets) / 6.0                 # bullet count
-    obs[idx + 10] = ship.d_theta / 1.5                # rotation rate: -1=full-right, +1=full-left
-    idx += SHIP_FEATURES
-
-    # Sort rocks by CPA danger: most threatening (soonest, closest approach) first.
-    # This puts the primary evasion target at a consistent observation index.
-    def _danger_key(r):
+def _danger_key(ship):
+    """Return a sort key that scores each rock by CPA threat (most dangerous = most negative)."""
+    def key(r):
         dx = wrap_delta(ship.x, r.x, winWidth)
         dy = wrap_delta(ship.y, r.y, winHeight)
         rvx = (r.dx - ship.dx) * SIM_DT
@@ -267,8 +241,46 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
             t = 60.0
             cd = sqrt(dx * dx + dy * dy) - 0.7 * (r.radius + SHIP_RADIUS)
         return -(r.radius / 30.0) * (1.0 + max(0.0, 1.0 - t / 20.0)) / max(1.0, cd + 8.0)
+    return key
 
-    rock_list = sorted(rocks, key=_danger_key)
+
+def build_observation(ship, rocks, bullets, shoot_cooldown=0):
+    """Convert sim state to a fixed-size numpy float32 vector."""
+    obs = np.zeros(STATE_DIM, dtype=np.float32)
+    idx = 0
+
+    fwd_x = -sin(ship.theta * pi / 180)
+    fwd_y = -cos(ship.theta * pi / 180)
+
+    # Actual bullet direction: heading + rotation deflection + ship velocity.
+    # At non-zero ship velocity the bullet travels differently from the heading;
+    # using this for aim_dot/aim_cross gives correct gradient for shots that land.
+    _blt_dx = 5.0 * fwd_x + ship.d_theta * fwd_y + ship.dx
+    _blt_dy = 5.0 * fwd_y - ship.d_theta * fwd_x + ship.dy
+    _blt_spd = sqrt(_blt_dx * _blt_dx + _blt_dy * _blt_dy)
+    if _blt_spd > 1e-6:
+        blt_x, blt_y = _blt_dx / _blt_spd, _blt_dy / _blt_spd
+    else:
+        blt_x, blt_y = fwd_x, fwd_y
+
+    # Ship features (11)
+    obs[idx]     = ship.x / winWidth - 0.5
+    obs[idx + 1] = ship.y / winHeight - 0.5
+    speed = sqrt(ship.dx ** 2 + ship.dy ** 2)
+    obs[idx + 2] = float(np.tanh(ship.dx / 15.0))
+    obs[idx + 3] = float(np.tanh(ship.dy / 15.0))
+    obs[idx + 4] = float(np.tanh(speed / 15.0))
+    obs[idx + 5] = sin(ship.theta * pi / 180)
+    obs[idx + 6] = cos(ship.theta * pi / 180)
+    obs[idx + 7] = min(len(rocks), MAX_ROCKS) / MAX_ROCKS
+    obs[idx + 8] = max(0.0, shoot_cooldown) / 15.0   # shoot cooldown fraction (0=ready, 1=just fired)
+    obs[idx + 9] = len(bullets) / MAX_BULLETS          # bullet count
+    obs[idx + 10] = ship.d_theta / 1.5                # rotation rate: -1=full-right, +1=full-left
+    idx += SHIP_FEATURES
+
+    # Sort rocks by CPA danger: most threatening (soonest, closest approach) first.
+    # This puts the primary evasion target at a consistent observation index.
+    rock_list = sorted(rocks, key=_danger_key(ship))
 
     for i in range(MAX_ROCKS):
         if i < len(rock_list):
@@ -278,13 +290,12 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
             dist_to = sqrt(dx_to ** 2 + dy_to ** 2)
             obs[idx]     = dx_to / _DIAG
             obs[idx + 1] = dy_to / _DIAG
-            obs[idx + 2] = float(np.tanh((r.dx - ship.dx) / 5.0))
-            obs[idx + 3] = float(np.tanh((r.dy - ship.dy) / 5.0))
+            obs[idx + 2] = float(np.tanh((r.dx - ship.dx) / 15.0))
+            obs[idx + 3] = float(np.tanh((r.dy - ship.dy) / 15.0))
             obs[idx + 4] = r.radius / 50.0
-            # Aim features: dot and cross of heading with lead-targeted rock direction.
-            # Uses same lead formula as the reward function so obs aligns with reward.
+            # Aim features: dot and cross of actual bullet direction with lead-targeted rock direction.
             if dist_to > 1e-6:
-                t_flight = dist_to / (5.0 * SIM_DT)
+                t_flight = dist_to / max(1e-6, _blt_spd * SIM_DT)
                 lead_x = dx_to + (r.dx - ship.dx) * SIM_DT * t_flight
                 lead_y = dy_to + (r.dy - ship.dy) * SIM_DT * t_flight
                 lead_dist = sqrt(lead_x * lead_x + lead_y * lead_y)
@@ -292,8 +303,8 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
                     nx, ny = lead_x / lead_dist, lead_y / lead_dist
                 else:
                     nx, ny = dx_to / dist_to, dy_to / dist_to
-                obs[idx + 5] = fwd_x * nx + fwd_y * ny   # aim_dot (-1 to 1)
-                obs[idx + 6] = fwd_x * ny - fwd_y * nx   # aim_cross (turn direction)
+                obs[idx + 5] = blt_x * nx + blt_y * ny   # aim_dot (-1 to 1)
+                obs[idx + 6] = blt_x * ny - blt_y * nx   # aim_cross (turn direction)
             # CPA features: time-to-closest-approach and miss distance
             rel_vx = (r.dx - ship.dx) * SIM_DT
             rel_vy = (r.dy - ship.dy) * SIM_DT
@@ -444,17 +455,21 @@ class AsteroidsEnv:
         reward = 0.0
         shot_fired = False
 
+        # Capture actual bullet direction from the bullet object (includes ship velocity).
+        fire_fwd_x = -sin(self.ship.theta * pi / 180)   # fallback: pure heading
+        fire_fwd_y = -cos(self.ship.theta * pi / 180)
+        fire_speed_dt = 5.0 * SIM_DT
+
         # Handle shooting with cooldown
-        if shoot and self.shoot_cooldown <= 0 and len(self.bullets) < 6:
-            self.bullets.append(make_sim_bullet(self.ship))
+        if shoot and self.shoot_cooldown <= 0 and len(self.bullets) < MAX_BULLETS:
+            _nb = make_sim_bullet(self.ship)
+            self.bullets.append(_nb)
             self.shoot_cooldown = 15  # reference frames
             shot_fired = True
-
-        # Capture heading at fire time.  The bullet direction is fixed here; the
-        # post-step heading (used by the continuous aim reward) can differ by up to
-        # SIM_STEPS_PER_ACTION * SIM_DT * 1.5° = 15° when the action includes turning.
-        fire_fwd_x = -sin(self.ship.theta * pi / 180)
-        fire_fwd_y = -cos(self.ship.theta * pi / 180)
+            if _nb.speed > 1e-6:
+                fire_fwd_x = _nb.dx / _nb.speed
+                fire_fwd_y = _nb.dy / _nb.speed
+                fire_speed_dt = _nb.speed * SIM_DT
 
         for _ in range(SIM_STEPS_PER_ACTION):
             self.ship.step(thrust, left, right)
@@ -502,63 +517,63 @@ class AsteroidsEnv:
                 self._spawn_children(r)
 
         self.steps += 1
-        reward += 0.05  # survival: reward every step the ship stays alive
+        reward += 0.01  # survival: small keep-alive signal; killing rocks must dominate
+
+        if len(self.rocks) == 1:
+            dist_to_center = torus_dist(
+                self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
+            )
+            reward += 0.5 * max(0.0, 1.0 - dist_to_center / 350.0)
 
         # Wave cleared
         if len(self.rocks) == 0:
             self.waves_cleared_this_ep += 1
             reward += 8.0 * self.wave_rocks
-            # Center-positioning bonus: up to +5 for being within 300 px of center at the
-            # moment of the last kill.  Teaches the agent to return to center before clearing
-            # so it has maximum escape room when the next wave spawns from the edges.
             dist_to_center = torus_dist(
                 self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
             )
-            reward += 5.0 * max(0.0, 1.0 - dist_to_center / 300.0)
+            reward += 7.0 * max(0.0, 1.0 - dist_to_center / 300.0)
+            _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
+            reward += 3.0 * max(0.0, 1.0 - _speed / 8.0)
             self.wave_rocks = min(self.wave_rocks + 1, self.num_rocks + 1)
             for _ in range(self.wave_rocks):
                 self._spawn_big_rock()
 
-        # On-fire bonus: evaluated against the single most CPA-dangerous rock only.
-        # Threshold is physics-based: cos(arcsin(radius/dist)) — the minimum alignment
-        # for the bullet to physically intersect the rock collision circle.
-        # E[kill_credit/random_shot] ≈ +0.43 > 0 (no shot cost), so random firing is
-        # profitable enough that Q(shoot) stays positive. Aimed shots earn up to +10.2,
-        # creating a strong gradient toward precision without penalizing exploration.
+        # On-fire bonus: best aim reward across all rocks.
+        # Threshold is physics-based: cos(arcsin(radius/dist)) — minimum alignment for
+        # the bullet to intersect the collision circle.  Below-threshold approach bonus
+        # provides gradient for near-misses on small fast-moving fragments where
+        # cos_hit ≈ 0.997 and the hard threshold would give zero signal.
         if shot_fired:
-            if self.rocks:
-                ship = self.ship
-                def _primary_key(r):
-                    dx = wrap_delta(ship.x, r.x, winWidth)
-                    dy = wrap_delta(ship.y, r.y, winHeight)
-                    rvx = (r.dx - ship.dx) * SIM_DT
-                    rvy = (r.dy - ship.dy) * SIM_DT
-                    rs2 = rvx * rvx + rvy * rvy
-                    if rs2 > 0.001:
-                        t = max(0.0, min(-(dx * rvx + dy * rvy) / rs2, 60.0))
-                        cd = sqrt((dx + rvx * t) ** 2 + (dy + rvy * t) ** 2) - 0.7 * (r.radius + SHIP_RADIUS)
-                    else:
-                        t = 60.0
-                        cd = sqrt(dx * dx + dy * dy) - 0.7 * (r.radius + SHIP_RADIUS)
-                    return -(r.radius / 30.0) * (1.0 + max(0.0, 1.0 - t / 20.0)) / max(1.0, cd + 8.0)
-                primary = min(self.rocks, key=_primary_key)
-                dx_to = wrap_delta(ship.x, primary.x, winWidth)
-                dy_to = wrap_delta(ship.y, primary.y, winHeight)
+            best_aim_r = 0.0
+            for r in self.rocks:
+                dx_to = wrap_delta(self.ship.x, r.x, winWidth)
+                dy_to = wrap_delta(self.ship.y, r.y, winHeight)
                 dist_to = sqrt(dx_to * dx_to + dy_to * dy_to)
-                if dist_to > primary.radius:
-                    t_flight = dist_to / (5.0 * SIM_DT)
-                    lead_x = dx_to + (primary.dx - ship.dx) * SIM_DT * t_flight
-                    lead_y = dy_to + (primary.dy - ship.dy) * SIM_DT * t_flight
+                if dist_to > r.radius:
+                    t_flight = dist_to / max(1e-6, fire_speed_dt)
+                    lead_x = dx_to + (r.dx - self.ship.dx) * SIM_DT * t_flight
+                    lead_y = dy_to + (r.dy - self.ship.dy) * SIM_DT * t_flight
                     lead_dist = sqrt(lead_x * lead_x + lead_y * lead_y)
                     if lead_dist > 1e-6:
                         fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
-                        cos_hit = sqrt(max(0.0, 1.0 - (primary.radius / dist_to) ** 2))
-                        if fire_dot > cos_hit:
-                            reward += (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit) * 2.5
+                        cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
+                        approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
+                        aim_r = max(0.0, approach) * 3.5 + max(0.0, fire_dot) * 0.3
+                        best_aim_r = max(best_aim_r, aim_r)
+            reward += best_aim_r
 
         # Per-step CPA penalty: sum of top-3 threats catches multi-rock encirclement.
         if self.rocks:
-            reward -= self._cpa_danger_top3() * 0.03
+            reward -= self._cpa_danger_top3() * 0.15
+
+        # Spin penalty: sustained rotation without aiming is mildly costly, breaking
+        # the spin-and-shoot local optimum while still allowing purposeful turning.
+        _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
+        if _speed > 4.0:
+            reward -= (_speed - 4.0) * 0.01
+
+        reward -= abs(self.ship.d_theta) * 0.004 * SIM_STEPS_PER_ACTION
 
         done = self.steps >= MAX_EPISODE_STEPS
         obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
@@ -638,12 +653,12 @@ class EntityTransformerQNetwork(nn.Module):
     def _make_pad_mask(obs):
         """(B, 25) bool mask — True = ignore token as attention key.
         Masks both empty rock slots (from obs[:, 7] = rock_count/MAX_ROCKS) and
-        empty bullet slots (from obs[:, 9] = bullet_count/6, capped at MAX_BULLETS)."""
+        empty bullet slots (from obs[:, 9] = bullet_count/MAX_BULLETS)."""
         B = obs.shape[0]
         n_rocks = (obs[:, 7] * MAX_ROCKS).round().long().clamp(0, MAX_ROCKS)
         rock_slot_idx = torch.arange(1, MAX_ROCKS + 1, device=obs.device).unsqueeze(0)
         mask_rocks = rock_slot_idx > n_rocks.unsqueeze(1)              # (B, MAX_ROCKS)
-        n_bullets = (obs[:, 9] * 6.0).round().long().clamp(0, MAX_BULLETS)
+        n_bullets = (obs[:, 9] * MAX_BULLETS).round().long().clamp(0, MAX_BULLETS)
         bullet_slot_idx = torch.arange(1, MAX_BULLETS + 1, device=obs.device).unsqueeze(0)
         mask_bullets = bullet_slot_idx > n_bullets.unsqueeze(1)        # (B, MAX_BULLETS)
         ship_mask = obs.new_zeros(B, 1, dtype=torch.bool)
@@ -667,9 +682,9 @@ class EntityTransformerQNetwork(nn.Module):
 
         # Mean-pool non-padded rock tokens: gives Q-heads a field-wide threat summary
         # without requiring the ship token alone to compress all rock information.
-        rock_out   = self.final_ln(tokens[:, 1:MAX_ROCKS + 1])     # (B, 12, d)
-        rock_mask  = pad_mask[:, 1:MAX_ROCKS + 1]                  # (B, 12) True=padded
-        rock_valid = (~rock_mask).float().unsqueeze(-1)             # (B, 12, 1)
+        rock_out   = self.final_ln(tokens[:, 1:MAX_ROCKS + 1])     # (B, 20, d)
+        rock_mask  = pad_mask[:, 1:MAX_ROCKS + 1]                  # (B, 20) True=padded
+        rock_valid = (~rock_mask).float().unsqueeze(-1)             # (B, 20, 1)
         rock_mean  = (rock_out * rock_valid).sum(dim=1) / rock_valid.sum(dim=1).clamp(min=1)
         combined   = ship_out + rock_mean                           # (B, d)
 
@@ -1008,16 +1023,15 @@ def train(num_episodes=50000, save_every=100, model_path="dqn_model.pt", clear_b
     wave_clear_history = deque(maxlen=100)
 
     # Curriculum: promote when avg100 exceeds this threshold.
-    # Score arithmetic (level 1, wave-by-wave):
-    #   Wave 1 (1 big → 7 kills × 8 = 56 + 8 wave bonus + ~3 center):   ~67
-    #   Wave 2 (2 bigs → 14 kills × 8 = 112 + 16 wave bonus + ~3):      ~131
-    #   Wave 3 (3 bigs → 21 kills × 8 = 168 + 24 wave bonus + ~3):      ~195
-    #   Survival bonus (~900 steps × 0.05):                               ~45
-    #   2-wave total: ~200–220.   3-wave total: ~438.
-    # Threshold 300 sits between 2-wave and 3-wave scores at every level;
-    # a spinning non-clearing agent at level 5 scores ~66. Well below 300.
-    CURRICULUM_THRESHOLD = 300.0
-    CURRICULUM_MIN_EPS = 5000    # don't promote before this many episodes at current level
+    # Score arithmetic (level 1, wave-by-wave, survival = 0.01/step):
+    #   Wave 1 (7 kills×8=56 + 8 wave + ~3 center + ~3 speed-at-clear + ~6 survival): ~76
+    #   Wave 2 (14 kills×8=112 + 16 wave + ~3 + ~3 + ~9 survival):                   ~143
+    #   After 2 waves (~2000 steps × 0.01):                                             ~20
+    #   2-wave greedy total: ~239.  Epsilon-greedy at eps=0.10 suppresses avg by ~30-40.
+    #   Threshold 190 requires solid 2-wave play from the epsilon-greedy policy.
+    #   A dodge-only agent (3500 × 0.01 survival): ~35.
+    CURRICULUM_THRESHOLD = 190.0
+    CURRICULUM_MIN_EPS = 3000    # epsilon stabilises at ~ep 2000; 3000 gives 1000 low-eps episodes before first check
 
     for ep in range(1, num_episodes + 1):
         state = env.reset()
@@ -1056,19 +1070,19 @@ def train(num_episodes=50000, save_every=100, model_path="dqn_model.pt", clear_b
             )
 
         # Curriculum: promote only when agent has genuinely mastered the current level.
-        # avg >= 300: requires near-consistent 3-wave play at every curriculum level.
+        # avg >= 190: solid 2-wave play under eps-greedy (greedy policy ≈ +30-40 higher).
         # avglen >= 600: agent must survive long enough to attempt multi-wave play.
-        # avg_waves >= 2.5: rolling mean of waves cleared per episode must be ≥2.5.
+        # avg_waves >= 1.5: relaxed from 2.0 — epsilon disrupts wave completions.
         # clears >= 50: ≥50% of last 100 episodes cleared at least 1 wave.
-        # 3x >= 20: ≥20% of last 100 episodes cleared ≥3 waves.
+        # 3x >= 10: ≥10% cleared ≥3 waves — relaxed from 20 for epsilon-greedy realism.
         if (cur_rocks < NUM_ROCKS
                 and eps_at_level >= CURRICULUM_MIN_EPS
                 and len(reward_history) >= 100
                 and avg > CURRICULUM_THRESHOLD
                 and avg_len >= 600
-                and avg_waves >= 2.5
+                and avg_waves >= 1.5
                 and sum(wave_clear_history) >= 50
-                and sum(1 for x in wave_clear_history if x >= 3) >= 20):
+                and sum(1 for x in wave_clear_history if x >= 3) >= 10):
             cur_rocks += 1
             env.num_rocks = cur_rocks
             reward_history.clear()
@@ -1165,7 +1179,7 @@ def watch(model_path="dqn_model.pt"):
             thrust, left, right, shoot = ACTIONS[action_idx]
             action_frames_left = SIM_STEPS_PER_ACTION
 
-            if shoot and shoot_cooldown <= 0 and len(bullets) < 6:
+            if shoot and shoot_cooldown <= 0 and len(bullets) < MAX_BULLETS:
                 fire_this_frame = True
                 shoot_cooldown = 15
 

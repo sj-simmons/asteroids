@@ -275,7 +275,7 @@ def simulate_game(net, num_rocks=NUM_ROCKS):
             break
 
         # --- Build neural network inputs ---
-        inputs = build_inputs(ship, rocks, bullets)
+        inputs = build_inputs(ship, rocks, bullets, shoot_timer)
 
         # --- Query the network ---
         output = net.activate(inputs)
@@ -419,17 +419,16 @@ def simulate_game(net, num_rocks=NUM_ROCKS):
 
         # --- Update bullets ---
         new_bullets = []
+        killed_rocks = []
         for b in bullets:
             b.step()
             if b.dist_left > 0:
-                # Check bullet-rock collisions
                 hit = False
                 for i, r in enumerate(rocks):
                     if collides(b.x, b.y, BULLET_RADIUS, r.x, r.y, r.radius):
                         rocks_destroyed += 1
-                        children = destroy_rock(r)
+                        killed_rocks.append(r)
                         rocks.pop(i)
-                        rocks.extend(children)
                         hit = True
                         break
                 if not hit:
@@ -440,15 +439,19 @@ def simulate_game(net, num_rocks=NUM_ROCKS):
         for r in rocks:
             r.step()
 
-        # --- Check ship-rock collision ---
+        # Ship-rock collision checked BEFORE spawning children: a close-range
+        # kill cannot produce a child rock that immediately overlaps the ship.
         ship_hit = False
         for r in rocks:
-            if collides(ship.x, ship.y, SHIP_RADIUS * 0.7, r.x, r.y, r.radius):
+            if torus_dist(ship.x, ship.y, r.x, r.y) < 0.7 * (SHIP_RADIUS + r.radius):
                 ship_hit = True
                 break
 
         if ship_hit:
             break
+
+        for r in killed_rocks:
+            rocks.extend(destroy_rock(r))
 
     # Per-rock reward gives a gradient even within a level
     fitness += rocks_destroyed * 100
@@ -461,7 +464,7 @@ def simulate_game(net, num_rocks=NUM_ROCKS):
 # ---------------------------------------------------------------------------
 # Neural network input construction
 # ---------------------------------------------------------------------------
-# Inputs (32 total):
+# Inputs (38 total):
 #   0:  ship.x / winWidth
 #   1:  ship.y / winHeight
 #   2:  ship.dx (clamped, normalized)
@@ -478,9 +481,11 @@ def simulate_game(net, num_rocks=NUM_ROCKS):
 #  13:  threat_sin — x-component of net incoming threat direction
 #  14:  threat_cos — y-component of net incoming threat direction
 #  15:  flee_dot — dot(thrust_dir, -threat_dir): +1=thrust flees, -1=thrust toward threat
-# For 4 closest rocks (indices 16-31, 4 per rock):
-#   rel_dx, rel_dy (normalized), distance (normalized), closing_speed (normalized)
-# Total: 16 + 16 = 32
+#  16:  bullets in flight / MAX_BULLETS (0=none, 1=max)
+#  17:  shoot_timer / SHOOT_COOLDOWN (0=ready, 1=just fired)
+# For 4 closest rocks (indices 18-37, 5 per rock):
+#   rel_dx, rel_dy (normalized), distance (normalized), t_cpa (/60), cpa_dist (/200)
+# Total: 18 + 20 = 38
 
 NUM_CLOSEST_ROCKS = 4
 MAX_SPEED_NORM = 5.0
@@ -563,7 +568,7 @@ def intercept_aim_angle(ship, rock, rel_dx, rel_dy):
     return (target_angle - ship.theta + 180) % 360 - 180
 
 
-def build_inputs(ship, rocks, bullets):
+def build_inputs(ship, rocks, bullets, shoot_timer=0):
     # Sort rocks by distance to ship
     rock_data = []
     for r in rocks:
@@ -638,22 +643,39 @@ def build_inputs(ship, rocks, bullets):
         threat_sin_val,                           # x of net threat direction
         threat_cos_val,                           # y of net threat direction
         flee_dot,                                 # +1 = thrust flees threat, -1 = thrust toward it
+        len(bullets) / MAX_BULLETS,               # bullets in flight
+        shoot_timer / SHOOT_COOLDOWN,             # cooldown fraction (0=ready, 1=just fired)
     ]
 
     for i in range(NUM_CLOSEST_ROCKS):
         if i < len(rock_data):
-            dist, rel_dx, rel_dy, cs, _ = rock_data[i]
+            dist, rel_dx, rel_dy, cs, r = rock_data[i]
             inputs.append(rel_dx / HALF_W)
             inputs.append(rel_dy / HALF_H)
             inputs.append(dist / DIAG)
-            inputs.append(max(-1, min(1, cs / MAX_SPEED_NORM)))
+            # CPA features: time to closest approach and miss distance
+            rel_vx = (r.dx - ship.dx) * SIM_DT
+            rel_vy = (r.dy - ship.dy) * SIM_DT
+            rel_speed_sq = rel_vx * rel_vx + rel_vy * rel_vy
+            if rel_speed_sq > 0.001:
+                t_cpa = -(rel_dx * rel_vx + rel_dy * rel_vy) / rel_speed_sq
+                t_cpa = max(0.0, min(t_cpa, 60.0))
+                cpa_dx = rel_dx + rel_vx * t_cpa
+                cpa_dy = rel_dy + rel_vy * t_cpa
+                cpa_dist = sqrt(cpa_dx * cpa_dx + cpa_dy * cpa_dy) - 0.7 * (r.radius + SHIP_RADIUS)
+            else:
+                t_cpa = 60.0
+                cpa_dist = dist - 0.7 * (r.radius + SHIP_RADIUS)
+            inputs.append(t_cpa / 60.0)
+            inputs.append(max(-1.0, min(1.0, cpa_dist / 200.0)))
         else:
             inputs.append(0.0)
             inputs.append(0.0)
             inputs.append(1.0)
-            inputs.append(0.0)
+            inputs.append(1.0)   # t_cpa: far future
+            inputs.append(1.0)   # cpa_dist: far away
 
-    assert len(inputs) == 32, f"Expected 32 inputs, got {len(inputs)}"
+    assert len(inputs) == 38, f"Expected 38 inputs, got {len(inputs)}"
     return inputs
 
 
@@ -760,7 +782,10 @@ def play(genome_path):
         sim_ship = SimShip(ship.p.x, ship.p.y, ship.dx, ship.dy, ship._theta)
 
         sim_bullets = []
-        inputs = build_inputs(sim_ship, sim_rocks, sim_bullets)
+        for b in bullets:
+            remaining = b.distance - b.distance_travelled
+            sim_bullets.append(SimBullet(b.p.x, b.p.y, b.dx, b.dy, remaining))
+        inputs = build_inputs(sim_ship, sim_rocks, sim_bullets, shoot_timer / SIM_DT)
         output = net.activate(inputs)
 
         thrust = output[0] > 0.5
