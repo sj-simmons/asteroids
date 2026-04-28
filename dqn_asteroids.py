@@ -519,11 +519,11 @@ class AsteroidsEnv:
         self.steps += 1
         reward += 0.01  # survival: small keep-alive signal; killing rocks must dominate
 
-        if len(self.rocks) == 1:
+        if self.rocks:
             dist_to_center = torus_dist(
                 self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
             )
-            reward += 0.5 * max(0.0, 1.0 - dist_to_center / 350.0)
+            reward += (0.5 / len(self.rocks)) * max(0.0, 1.0 - dist_to_center / 400.0)
 
         # Wave cleared
         if len(self.rocks) == 0:
@@ -532,7 +532,7 @@ class AsteroidsEnv:
             dist_to_center = torus_dist(
                 self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
             )
-            reward += 7.0 * max(0.0, 1.0 - dist_to_center / 300.0)
+            reward += 10.0 * max(0.0, 1.0 - dist_to_center / 300.0)
             _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
             reward += 3.0 * max(0.0, 1.0 - _speed / 8.0)
             self.wave_rocks = min(self.wave_rocks + 1, self.num_rocks + 1)
@@ -559,19 +559,21 @@ class AsteroidsEnv:
                         fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
                         cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
                         approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
-                        aim_r = max(0.0, approach) * 3.5 + max(0.0, fire_dot) * 0.3
+                        aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
                         best_aim_r = max(best_aim_r, aim_r)
             reward += best_aim_r
+            if self.rocks:
+                min_dist = min(
+                    torus_dist(self.ship.x, self.ship.y, r.x, r.y) for r in self.rocks
+                )
+                reward -= 2.0 * max(0.0, 1.0 - min_dist / 120.0)
 
-        # Per-step CPA penalty: sum of top-3 threats catches multi-rock encirclement.
         if self.rocks:
-            reward -= self._cpa_danger_top3() * 0.15
+            reward -= self._cpa_danger_top3() * 0.35
 
-        # Spin penalty: sustained rotation without aiming is mildly costly, breaking
-        # the spin-and-shoot local optimum while still allowing purposeful turning.
         _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
         if _speed > 4.0:
-            reward -= (_speed - 4.0) * 0.01
+            reward -= (_speed - 4.0) * 0.04
 
         reward -= abs(self.ship.d_theta) * 0.004 * SIM_STEPS_PER_ACTION
 

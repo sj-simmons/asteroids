@@ -205,7 +205,7 @@ LR              = 3e-4
 GAMMA           = 0.99
 GAE_LAMBDA      = 0.95
 CLIP_EPS        = 0.2
-ENT_COEF        = 0.01
+ENT_COEF        = 0.015
 VALUE_COEF      = 0.5
 N_STEPS         = 2048      # transitions collected per PPO update
 MINI_BATCH_SIZE = 256
@@ -505,11 +505,11 @@ class AsteroidsEnv:
         self.steps += 1
         reward += 0.01  # survival: small keep-alive signal; killing rocks must dominate
 
-        if len(self.rocks) == 1:
+        if self.rocks:
             dist_to_center = torus_dist(
                 self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
             )
-            reward += 0.5 * max(0.0, 1.0 - dist_to_center / 350.0)
+            reward += (0.5 / len(self.rocks)) * max(0.0, 1.0 - dist_to_center / 400.0)
 
         if len(self.rocks) == 0:
             self.waves_cleared_this_ep += 1
@@ -517,7 +517,7 @@ class AsteroidsEnv:
             dist_to_center = torus_dist(
                 self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
             )
-            reward += 7.0 * max(0.0, 1.0 - dist_to_center / 300.0)
+            reward += 10.0 * max(0.0, 1.0 - dist_to_center / 300.0)
             _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
             reward += 3.0 * max(0.0, 1.0 - _speed / 8.0)
             self.wave_rocks = min(self.wave_rocks + 1, self.num_rocks + 1)
@@ -540,16 +540,21 @@ class AsteroidsEnv:
                         fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
                         cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
                         approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
-                        aim_r = max(0.0, approach) * 3.5 + max(0.0, fire_dot) * 0.3
+                        aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
                         best_aim_r = max(best_aim_r, aim_r)
             reward += best_aim_r
+            if self.rocks:
+                min_dist = min(
+                    torus_dist(self.ship.x, self.ship.y, r.x, r.y) for r in self.rocks
+                )
+                reward -= 2.0 * max(0.0, 1.0 - min_dist / 120.0)
 
         if self.rocks:
-            reward -= self._cpa_danger_top3() * 0.15
+            reward -= self._cpa_danger_top3() * 0.35
 
         _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
         if _speed > 4.0:
-            reward -= (_speed - 4.0) * 0.01
+            reward -= (_speed - 4.0) * 0.04
 
         reward -= abs(self.ship.d_theta) * 0.004 * SIM_STEPS_PER_ACTION
 
@@ -634,7 +639,7 @@ class RolloutBuffer:
                 nnt = 1.0 - float(next_done)
             else:
                 nv  = self.values[t + 1]
-                nnt = 1.0 - self.dones[t + 1]
+                nnt = 1.0 - self.dones[t]
             delta    = self.rewards[t] + GAMMA * nv * nnt - self.values[t]
             last_gae = delta + GAMMA * GAE_LAMBDA * nnt * last_gae
             self.advantages[t] = last_gae
@@ -877,7 +882,7 @@ def watch(model_path="ppo_model.pt"):
             obs = build_observation(s, rs, bs, shoot_cooldown)
             with torch.no_grad():
                 logits, _ = net.forward(torch.tensor(obs, device=device).unsqueeze(0))
-            action_idx = logits.argmax(dim=-1).item()
+            action_idx = torch.distributions.Categorical(logits=logits).sample().item()
             thrust, left, right, shoot = ACTIONS[action_idx]
             action_frames_left = SIM_STEPS_PER_ACTION
 
