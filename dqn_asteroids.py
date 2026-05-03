@@ -21,7 +21,7 @@ import numpy as np
 # Game constants (must match asteroids.py)
 # ---------------------------------------------------------------------------
 
-NUM_ROCKS = 5
+NUM_ROCKS = 10
 WIDTH = 900
 HEIGHT = 700
 winWidth = WIDTH + 1
@@ -188,7 +188,7 @@ SIM_STEPS_PER_ACTION = 4
 # Hyperparameters
 # ---------------------------------------------------------------------------
 
-MAX_ROCKS = 20          # observe up to this many rocks (20 covers wave-3+ multi-fragment peaks)
+MAX_ROCKS = 30          # observe up to this many rocks
 MAX_BULLETS = 4         # observe up to this many bullets
 SHIP_FEATURES = 11      # ship state + cooldown + bullet count + rotation rate
 ROCK_FEATURES = 10      # pos(2) + vel(2) + radius + aim_dot + aim_cross + t_cpa + cpa_dist + occupied
@@ -519,11 +519,10 @@ class AsteroidsEnv:
         self.steps += 1
         reward += 0.01  # survival: small keep-alive signal; killing rocks must dominate
 
-        if self.rocks:
-            dist_to_center = torus_dist(
-                self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
-            )
-            reward += (0.5 / len(self.rocks)) * max(0.0, 1.0 - dist_to_center / 400.0)
+        dist_to_center = torus_dist(
+            self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
+        )
+        reward += 0.02 * max(0.0, 1.0 - dist_to_center / 400.0)
 
         # Wave cleared
         if len(self.rocks) == 0:
@@ -539,13 +538,17 @@ class AsteroidsEnv:
             for _ in range(self.wave_rocks):
                 self._spawn_big_rock()
 
+        # Penalize shooting while spinning: deliberate aiming requires stopping rotation.
+        if shot_fired:
+            spin_frac = abs(self.ship.d_theta) / 1.5
+            reward -= 1.5 * max(0.0, spin_frac - 0.3)
+
         # On-fire bonus: best aim reward across all rocks.
-        # Threshold is physics-based: cos(arcsin(radius/dist)) — minimum alignment for
-        # the bullet to intersect the collision circle.  Below-threshold approach bonus
-        # provides gradient for near-misses on small fast-moving fragments where
-        # cos_hit ≈ 0.997 and the hard threshold would give zero signal.
+        # Only granted at low angular velocity — spinning must not substitute for aiming.
+        # Wasted shots (best fire_dot < 0.5) are penalized to prevent spray strategies.
         if shot_fired:
             best_aim_r = 0.0
+            best_fire_dot = -1.0
             for r in self.rocks:
                 dx_to = wrap_delta(self.ship.x, r.x, winWidth)
                 dy_to = wrap_delta(self.ship.y, r.y, winHeight)
@@ -557,25 +560,25 @@ class AsteroidsEnv:
                     lead_dist = sqrt(lead_x * lead_x + lead_y * lead_y)
                     if lead_dist > 1e-6:
                         fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
-                        cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
-                        approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
-                        aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
-                        best_aim_r = max(best_aim_r, aim_r)
+                        best_fire_dot = max(best_fire_dot, fire_dot)
+                        if abs(self.ship.d_theta) < 0.3:
+                            cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
+                            approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
+                            aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
+                            best_aim_r = max(best_aim_r, aim_r)
             reward += best_aim_r
+            reward -= 0.5 * max(0.0, 0.5 - best_fire_dot)
             if self.rocks:
                 min_dist = min(
                     torus_dist(self.ship.x, self.ship.y, r.x, r.y) for r in self.rocks
                 )
                 reward -= 2.0 * max(0.0, 1.0 - min_dist / 120.0)
 
-        if self.rocks:
-            reward -= self._cpa_danger_top3() * 0.35
-
         _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
         if _speed > 4.0:
             reward -= (_speed - 4.0) * 0.04
 
-        reward -= abs(self.ship.d_theta) * 0.004 * SIM_STEPS_PER_ACTION
+        reward -= abs(self.ship.d_theta) * 0.02 * SIM_STEPS_PER_ACTION
 
         done = self.steps >= MAX_EPISODE_STEPS
         obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
@@ -625,9 +628,9 @@ class _TransformerLayer(nn.Module):
 class EntityTransformerQNetwork(nn.Module):
     """
     Entity-based transformer Q-network. Drop-in replacement for DuelingQNetwork.
-    Same input: (B, STATE_DIM=231) flat obs. Same output: (B, N_ACTIONS=12) Q-values.
+    Same input: (B, STATE_DIM) flat obs. Same output: (B, N_ACTIONS) Q-values.
 
-    Token layout (25 tokens): [0]=ship, [1..20]=rock slots, [21..24]=bullet slots.
+    Token layout (35 tokens): [0]=ship, [1..30]=rock slots, [31..34]=bullet slots.
     Masking: empty rock slots derived from obs[:, 7] (rock_count / MAX_ROCKS) so the
     ship token cannot attend to zero-filled padding.
     Aggregation: ship token (index 0) + mean-pooled rock tokens fed to dueling heads.
@@ -653,7 +656,7 @@ class EntityTransformerQNetwork(nn.Module):
 
     @staticmethod
     def _make_pad_mask(obs):
-        """(B, 25) bool mask — True = ignore token as attention key.
+        """(B, 35) bool mask — True = ignore token as attention key.
         Masks both empty rock slots (from obs[:, 7] = rock_count/MAX_ROCKS) and
         empty bullet slots (from obs[:, 9] = bullet_count/MAX_BULLETS)."""
         B = obs.shape[0]
@@ -664,19 +667,19 @@ class EntityTransformerQNetwork(nn.Module):
         bullet_slot_idx = torch.arange(1, MAX_BULLETS + 1, device=obs.device).unsqueeze(0)
         mask_bullets = bullet_slot_idx > n_bullets.unsqueeze(1)        # (B, MAX_BULLETS)
         ship_mask = obs.new_zeros(B, 1, dtype=torch.bool)
-        return torch.cat([ship_mask, mask_rocks, mask_bullets], dim=1)  # (B, 25)
+        return torch.cat([ship_mask, mask_rocks, mask_bullets], dim=1)  # (B, 35)
 
     def forward(self, obs):
         B = obs.shape[0]
-        _rs = SHIP_FEATURES                              # rock section start = 11
-        _re = SHIP_FEATURES + MAX_ROCKS * ROCK_FEATURES  # rock section end   = 211
+        _rs = SHIP_FEATURES
+        _re = SHIP_FEATURES + MAX_ROCKS * ROCK_FEATURES
         ship_tok = (self.ship_proj(obs[:, :_rs]).unsqueeze(1)
                     + self.type_embed.weight[0])                    # (B,  1, d)
         rock_tok = (self.rock_proj(obs[:, _rs:_re].reshape(B, MAX_ROCKS, ROCK_FEATURES))
-                    + self.type_embed.weight[1])                    # (B, 20, d)
+                    + self.type_embed.weight[1])                    # (B, 30, d)
         bullet_tok = (self.bullet_proj(obs[:, _re:STATE_DIM].reshape(B, MAX_BULLETS, BULLET_FEATURES))
                       + self.type_embed.weight[2])                  # (B,  4, d)
-        tokens   = torch.cat([ship_tok, rock_tok, bullet_tok], dim=1)  # (B, 25, d)
+        tokens   = torch.cat([ship_tok, rock_tok, bullet_tok], dim=1)  # (B, 35, d)
         pad_mask = self._make_pad_mask(obs)
         for layer in self.layers:
             tokens = layer(tokens, pad_mask)
@@ -684,9 +687,9 @@ class EntityTransformerQNetwork(nn.Module):
 
         # Mean-pool non-padded rock tokens: gives Q-heads a field-wide threat summary
         # without requiring the ship token alone to compress all rock information.
-        rock_out   = self.final_ln(tokens[:, 1:MAX_ROCKS + 1])     # (B, 20, d)
-        rock_mask  = pad_mask[:, 1:MAX_ROCKS + 1]                  # (B, 20) True=padded
-        rock_valid = (~rock_mask).float().unsqueeze(-1)             # (B, 20, 1)
+        rock_out   = self.final_ln(tokens[:, 1:MAX_ROCKS + 1])     # (B, 30, d)
+        rock_mask  = pad_mask[:, 1:MAX_ROCKS + 1]                  # (B, 30) True=padded
+        rock_valid = (~rock_mask).float().unsqueeze(-1)             # (B, 30, 1)
         rock_mean  = (rock_out * rock_valid).sum(dim=1) / rock_valid.sum(dim=1).clamp(min=1)
         combined   = ship_out + rock_mean                           # (B, d)
 
@@ -1102,16 +1105,13 @@ def train(num_episodes=50000, save_every=100, model_path="dqn_model.pt", clear_b
             # would let the next save_every interval declare any avg the new "best".
             cur_eps = EPS_END + (EPS_START - EPS_END) * max(0.0, 1.0 - level_steps / EPS_LEVEL_DECAY)
             if len(reward_history) >= 100:
-                # Only track best and degradation once epsilon is low enough that the
-                # rolling avg reflects the learned greedy policy, not random exploration.
-                if cur_eps <= 0.3:
-                    if avg > best_reward:
-                        best_reward = avg
-                        agent.save(model_path.replace(".pt", "_best.pt"), cur_rocks=cur_rocks,
-                                   eps_at_level=eps_at_level)
-                        print(f"  -> new best avg reward: {best_reward:.1f}")
-                    elif best_reward > 5.0 and avg < 0.5 * best_reward:
-                        print(f"  !! DEGRADATION: avg {avg:.1f} << best {best_reward:.1f}")
+                if avg > best_reward:
+                    best_reward = avg
+                    agent.save(model_path.replace(".pt", "_best.pt"), cur_rocks=cur_rocks,
+                               eps_at_level=eps_at_level)
+                    print(f"  -> new best avg reward: {best_reward:.1f}")
+                elif best_reward > 5.0 and avg < 0.5 * best_reward:
+                    print(f"  !! DEGRADATION: avg {avg:.1f} << best {best_reward:.1f}")
 
     agent.save(model_path, cur_rocks=cur_rocks, eps_at_level=eps_at_level)
     print("Training complete.")

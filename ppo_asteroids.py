@@ -21,7 +21,7 @@ import numpy as np
 # Game constants (must match asteroids.py)
 # ---------------------------------------------------------------------------
 
-NUM_ROCKS = 5
+NUM_ROCKS = 10
 WIDTH = 900
 HEIGHT = 700
 winWidth = WIDTH + 1
@@ -187,9 +187,9 @@ SIM_STEPS_PER_ACTION = 4
 # Observation constants
 # ---------------------------------------------------------------------------
 
-MAX_ROCKS = 20          # observe up to this many rocks
+MAX_ROCKS = 30          # observe up to this many rocks
 MAX_BULLETS = 4         # observe up to this many bullets
-SHIP_FEATURES = 11      # ship state + cooldown + bullet count + rotation rate
+SHIP_FEATURES = 13      # ship state + cooldown + bullet count + rotation rate + wave context
 ROCK_FEATURES = 10      # pos(2) + vel(2) + radius + aim_dot + aim_cross + t_cpa + cpa_dist + occupied
 BULLET_FEATURES = 5     # pos(2) + vel(2) + nearest_rock_dist
 STATE_DIM = SHIP_FEATURES + MAX_ROCKS * ROCK_FEATURES + MAX_BULLETS * BULLET_FEATURES
@@ -245,7 +245,7 @@ def _danger_key(ship):
 # Observation builder
 # ---------------------------------------------------------------------------
 
-def build_observation(ship, rocks, bullets, shoot_cooldown=0):
+def build_observation(ship, rocks, bullets, shoot_cooldown=0, wave_rocks=1, waves_cleared=0):
     """Convert sim state to a fixed-size numpy float32 vector."""
     obs = np.zeros(STATE_DIM, dtype=np.float32)
     idx = 0
@@ -262,7 +262,7 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
     else:
         blt_x, blt_y = fwd_x, fwd_y
 
-    # Ship features (11)
+    # Ship features (13)
     obs[idx]     = ship.x / winWidth - 0.5
     obs[idx + 1] = ship.y / winHeight - 0.5
     speed = sqrt(ship.dx ** 2 + ship.dy ** 2)
@@ -275,6 +275,8 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
     obs[idx + 8] = max(0.0, shoot_cooldown) / 15.0
     obs[idx + 9] = len(bullets) / MAX_BULLETS
     obs[idx + 10] = ship.d_theta / 1.5
+    obs[idx + 11] = len(rocks) / max(1, 7 * wave_rocks)
+    obs[idx + 12] = min(waves_cleared, 5) / 5.0
     idx += SHIP_FEATURES
 
     # Sort rocks by CPA danger: most threatening first.
@@ -372,7 +374,8 @@ class AsteroidsEnv:
         self.alive = True
         self.shoot_cooldown = 0
         self.waves_cleared_this_ep = 0
-        return build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
+        return build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown,
+                                 self.wave_rocks, self.waves_cleared_this_ep)
 
     def _spawn_big_rock(self):
         if random.randint(0, 1):
@@ -483,7 +486,12 @@ class AsteroidsEnv:
                         if torus_dist(b.x, b.y, r.x, r.y) < r.radius + 5:
                             hit_rocks.add(ri)
                             hit_bullets.add(bi)
-                            reward += 8.0
+                            if r.radius <= 15:
+                                reward += 12.0
+                            elif r.radius <= 30:
+                                reward += 8.0
+                            else:
+                                reward += 5.0
                             break
 
             killed = [self.rocks[ri] for ri in hit_rocks]
@@ -495,9 +503,11 @@ class AsteroidsEnv:
                 if torus_dist(self.ship.x, self.ship.y, r.x, r.y) < 0.7 * (r.radius + SHIP_RADIUS):
                     self.alive = False
                     self.steps += 1
-                    obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
-                    self.score += reward - 15.0
-                    return obs, reward - 15.0, True
+                    obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown,
+                                            self.wave_rocks, self.waves_cleared_this_ep)
+                    death_penalty = 15.0 + 5.0 * self.waves_cleared_this_ep
+                    self.score += reward - death_penalty
+                    return obs, reward - death_penalty, True
 
             for r in killed:
                 self._spawn_children(r)
@@ -505,11 +515,10 @@ class AsteroidsEnv:
         self.steps += 1
         reward += 0.01  # survival: small keep-alive signal; killing rocks must dominate
 
-        if self.rocks:
-            dist_to_center = torus_dist(
-                self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
-            )
-            reward += (0.5 / len(self.rocks)) * max(0.0, 1.0 - dist_to_center / 400.0)
+        dist_to_center = torus_dist(
+            self.ship.x, self.ship.y, winWidth / 2, winHeight / 2
+        )
+        reward += 0.02 * max(0.0, 1.0 - dist_to_center / 400.0)
 
         if len(self.rocks) == 0:
             self.waves_cleared_this_ep += 1
@@ -524,9 +533,17 @@ class AsteroidsEnv:
             for _ in range(self.wave_rocks):
                 self._spawn_big_rock()
 
+        # Penalize shooting while spinning: deliberate aiming requires stopping rotation.
+        if shot_fired:
+            spin_frac = abs(self.ship.d_theta) / 1.5
+            reward -= 1.5 * max(0.0, spin_frac - 0.3)
+
         # On-fire bonus: best aim reward across all rocks.
+        # Only granted at low angular velocity — spinning must not substitute for aiming.
+        # Wasted shots (best fire_dot < 0.5) are penalized to prevent spray strategies.
         if shot_fired:
             best_aim_r = 0.0
+            best_fire_dot = -1.0
             for r in self.rocks:
                 dx_to = wrap_delta(self.ship.x, r.x, winWidth)
                 dy_to = wrap_delta(self.ship.y, r.y, winHeight)
@@ -538,11 +555,14 @@ class AsteroidsEnv:
                     lead_dist = sqrt(lead_x * lead_x + lead_y * lead_y)
                     if lead_dist > 1e-6:
                         fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
-                        cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
-                        approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
-                        aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
-                        best_aim_r = max(best_aim_r, aim_r)
+                        best_fire_dot = max(best_fire_dot, fire_dot)
+                        if abs(self.ship.d_theta) < 0.3:
+                            cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
+                            approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
+                            aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
+                            best_aim_r = max(best_aim_r, aim_r)
             reward += best_aim_r
+            reward -= 0.5 * max(0.0, 0.5 - best_fire_dot)
             if self.rocks:
                 min_dist = min(
                     torus_dist(self.ship.x, self.ship.y, r.x, r.y) for r in self.rocks
@@ -556,10 +576,11 @@ class AsteroidsEnv:
         if _speed > 4.0:
             reward -= (_speed - 4.0) * 0.04
 
-        reward -= abs(self.ship.d_theta) * 0.004 * SIM_STEPS_PER_ACTION
+        reward -= abs(self.ship.d_theta) * 0.02 * SIM_STEPS_PER_ACTION
 
         done = self.steps >= MAX_EPISODE_STEPS
-        obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
+        obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown,
+                                self.wave_rocks, self.waves_cleared_this_ep)
         self.score += reward
         return obs, reward, done
 
@@ -629,17 +650,13 @@ class RolloutBuffer:
         self.values[i]    = value
         self.ptr += 1
 
-    def compute_gae(self, next_value, next_done):
+    def compute_gae(self, next_value):
         """Compute GAE advantages and lambda-returns in-place."""
         self.advantages = np.zeros(self.n, dtype=np.float32)
         last_gae = 0.0
         for t in reversed(range(self.n)):
-            if t == self.n - 1:
-                nv  = next_value
-                nnt = 1.0 - float(next_done)
-            else:
-                nv  = self.values[t + 1]
-                nnt = 1.0 - self.dones[t]
+            nv  = next_value if t == self.n - 1 else self.values[t + 1]
+            nnt = 1.0 - self.dones[t]
             delta    = self.rewards[t] + GAMMA * nv * nnt - self.values[t]
             last_gae = delta + GAMMA * GAE_LAMBDA * nnt * last_gae
             self.advantages[t] = last_gae
@@ -650,7 +667,7 @@ class RolloutBuffer:
 # PPO update step
 # ---------------------------------------------------------------------------
 
-def ppo_update(net, optimizer, buffer, device):
+def ppo_update(net, optimizer, buffer, device, ent_coef=ENT_COEF):
     states   = torch.tensor(buffer.states,    device=device)
     actions  = torch.tensor(buffer.actions,   device=device)
     old_lps  = torch.tensor(buffer.log_probs, device=device)
@@ -669,7 +686,7 @@ def ppo_update(net, optimizer, buffer, device):
                 ratio * adv_b,
                 torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
             )
-            loss = -surr.mean() + VALUE_COEF * F.mse_loss(v, returns[b]) - ENT_COEF * ent.mean()
+            loss = -surr.mean() + VALUE_COEF * F.mse_loss(v, returns[b]) - ent_coef * ent.mean()
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), GRAD_CLIP)
@@ -749,8 +766,12 @@ def train(num_episodes=50000, save_every=100, model_path="ppo_model.pt"):
         # Bootstrap value for the last (possibly mid-episode) state
         with torch.no_grad():
             _, boot_val = net.forward(torch.tensor(state, device=device).unsqueeze(0))
-        buffer.compute_gae(boot_val.item(), float(done))
-        ppo_update(net, optimizer, buffer, device)
+        buffer.compute_gae(boot_val.item())
+        frac = min(1.0, total_steps / 8_000_000)
+        for pg in optimizer.param_groups:
+            pg['lr'] = LR * (1.0 - 0.8 * frac)
+        cur_ent_coef = ENT_COEF * (1.0 - 0.5 * frac)
+        ppo_update(net, optimizer, buffer, device, ent_coef=cur_ent_coef)
         update += 1
 
         # Logging (every 10 updates = ~20k env steps)
