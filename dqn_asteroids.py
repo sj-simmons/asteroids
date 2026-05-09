@@ -181,7 +181,7 @@ ACTIONS = [
     (True,  False, True,  True),   # thrust+right+shoot
 ]
 
-SHIP_RADIUS = 18
+SHIP_RADIUS = 50
 SIM_STEPS_PER_ACTION = 4
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ N_ACTIONS = len(ACTIONS)
 GAMMA = 0.99
 LR = 1e-4
 BATCH_SIZE = 256
-REPLAY_SIZE = 400_000
+REPLAY_SIZE = 150_000
 TARGET_TAU = 0.005          # Polyak soft-update rate for target network
 GRAD_STEPS_PER_ENV = 2      # gradient updates per environment step (transformer needs ~2x MLP sample budget)
 GRAD_CLIP = 1.0             # max gradient norm
@@ -354,6 +354,8 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0):
 class AsteroidsEnv:
     """Gym-like environment wrapping the lightweight sim classes."""
 
+    WAVE_DELAY = 8  # action steps between waves (0-rock state the agent must learn to idle through)
+
     def __init__(self, num_rocks=1):
         self.num_rocks = num_rocks
         self.wave_rocks = num_rocks  # rocks in current wave (grows each wave)
@@ -365,6 +367,7 @@ class AsteroidsEnv:
         self.alive = True
         self.shoot_cooldown = 0
         self.waves_cleared_this_ep = 0
+        self.wave_delay_remaining = 0
 
     def reset(self):
         self.wave_rocks = self.num_rocks
@@ -378,6 +381,7 @@ class AsteroidsEnv:
         self.alive = True
         self.shoot_cooldown = 0
         self.waves_cleared_this_ep = 0
+        self.wave_delay_remaining = 0
         return build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
 
     def _spawn_big_rock(self):
@@ -453,23 +457,11 @@ class AsteroidsEnv:
         thrust, left, right, shoot = action
 
         reward = 0.0
-        shot_fired = False
-
-        # Capture actual bullet direction from the bullet object (includes ship velocity).
-        fire_fwd_x = -sin(self.ship.theta * pi / 180)   # fallback: pure heading
-        fire_fwd_y = -cos(self.ship.theta * pi / 180)
-        fire_speed_dt = 5.0 * SIM_DT
 
         # Handle shooting with cooldown
         if shoot and self.shoot_cooldown <= 0 and len(self.bullets) < MAX_BULLETS:
-            _nb = make_sim_bullet(self.ship)
-            self.bullets.append(_nb)
-            self.shoot_cooldown = 15  # reference frames
-            shot_fired = True
-            if _nb.speed > 1e-6:
-                fire_fwd_x = _nb.dx / _nb.speed
-                fire_fwd_y = _nb.dy / _nb.speed
-                fire_speed_dt = _nb.speed * SIM_DT
+            self.bullets.append(make_sim_bullet(self.ship))
+            self.shoot_cooldown = 15
 
         for _ in range(SIM_STEPS_PER_ACTION):
             self.ship.step(thrust, left, right)
@@ -495,7 +487,8 @@ class AsteroidsEnv:
                         if torus_dist(b.x, b.y, r.x, r.y) < r.radius + 5:
                             hit_rocks.add(ri)
                             hit_bullets.add(bi)
-                            reward += 8.0
+                            spin_frac = abs(self.ship.d_theta) / 1.5
+                            reward += 8.0 * (1.0 - 0.6 * spin_frac)
                             break
 
             killed = [self.rocks[ri] for ri in hit_rocks]
@@ -524,8 +517,8 @@ class AsteroidsEnv:
         )
         reward += 0.02 * max(0.0, 1.0 - dist_to_center / 400.0)
 
-        # Wave cleared
-        if len(self.rocks) == 0:
+        # Wave cleared — delay before spawning next wave so agent learns to idle
+        if len(self.rocks) == 0 and self.wave_delay_remaining <= 0:
             self.waves_cleared_this_ep += 1
             reward += 8.0 * self.wave_rocks
             dist_to_center = torus_dist(
@@ -535,50 +528,14 @@ class AsteroidsEnv:
             _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
             reward += 3.0 * max(0.0, 1.0 - _speed / 8.0)
             self.wave_rocks = min(self.wave_rocks + 1, self.num_rocks + 1)
-            for _ in range(self.wave_rocks):
-                self._spawn_big_rock()
-
-        # Penalize shooting while spinning: deliberate aiming requires stopping rotation.
-        if shot_fired:
-            spin_frac = abs(self.ship.d_theta) / 1.5
-            reward -= 1.5 * max(0.0, spin_frac - 0.3)
-
-        # On-fire bonus: best aim reward across all rocks.
-        # Only granted at low angular velocity — spinning must not substitute for aiming.
-        # Wasted shots (best fire_dot < 0.5) are penalized to prevent spray strategies.
-        if shot_fired:
-            best_aim_r = 0.0
-            best_fire_dot = -1.0
-            for r in self.rocks:
-                dx_to = wrap_delta(self.ship.x, r.x, winWidth)
-                dy_to = wrap_delta(self.ship.y, r.y, winHeight)
-                dist_to = sqrt(dx_to * dx_to + dy_to * dy_to)
-                if dist_to > r.radius:
-                    t_flight = dist_to / max(1e-6, fire_speed_dt)
-                    lead_x = dx_to + (r.dx - self.ship.dx) * SIM_DT * t_flight
-                    lead_y = dy_to + (r.dy - self.ship.dy) * SIM_DT * t_flight
-                    lead_dist = sqrt(lead_x * lead_x + lead_y * lead_y)
-                    if lead_dist > 1e-6:
-                        fire_dot = fire_fwd_x * lead_x / lead_dist + fire_fwd_y * lead_y / lead_dist
-                        best_fire_dot = max(best_fire_dot, fire_dot)
-                        if abs(self.ship.d_theta) < 0.3:
-                            cos_hit = sqrt(max(0.0, 1.0 - (r.radius / dist_to) ** 2))
-                            approach = (fire_dot - cos_hit) / max(1e-6, 1.0 - cos_hit)
-                            aim_r = max(0.0, approach) * 1.5 + max(0.0, fire_dot) * 0.2
-                            best_aim_r = max(best_aim_r, aim_r)
-            reward += best_aim_r
-            reward -= 0.5 * max(0.0, 0.5 - best_fire_dot)
-            if self.rocks:
-                min_dist = min(
-                    torus_dist(self.ship.x, self.ship.y, r.x, r.y) for r in self.rocks
-                )
-                reward -= 2.0 * max(0.0, 1.0 - min_dist / 120.0)
-
-        _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
-        if _speed > 4.0:
-            reward -= (_speed - 4.0) * 0.04
-
-        reward -= abs(self.ship.d_theta) * 0.02 * SIM_STEPS_PER_ACTION
+            self.wave_delay_remaining = self.WAVE_DELAY
+        elif len(self.rocks) == 0 and self.wave_delay_remaining > 0:
+            self.wave_delay_remaining -= 1
+            _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
+            reward += 0.05 * max(0.0, 1.0 - _speed / 2.0)
+            if self.wave_delay_remaining <= 0:
+                for _ in range(self.wave_rocks):
+                    self._spawn_big_rock()
 
         done = self.steps >= MAX_EPISODE_STEPS
         obs = build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown)
@@ -886,6 +843,8 @@ class DQNAgent:
     def __init__(self, state_dim=STATE_DIM, n_actions=N_ACTIONS, device=None):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.n_actions = n_actions
+        #self.q_net = EntityTransformerQNetwork(state_dim, n_actions).to(self.device)
+        #self.target_net = EntityTransformerQNetwork(state_dim, n_actions).to(self.device)
         self.q_net = EntityTransformerQNetwork(state_dim, n_actions).to(self.device)
         self.target_net = EntityTransformerQNetwork(state_dim, n_actions).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())

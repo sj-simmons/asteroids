@@ -180,7 +180,7 @@ ACTIONS = [
     (True,  False, True,  True),   # thrust+right+shoot
 ]
 
-SHIP_RADIUS = 18
+SHIP_RADIUS = 50
 SIM_STEPS_PER_ACTION = 4
 
 # ---------------------------------------------------------------------------
@@ -350,6 +350,8 @@ def build_observation(ship, rocks, bullets, shoot_cooldown=0, wave_rocks=1, wave
 class AsteroidsEnv:
     """Gym-like environment wrapping the lightweight sim classes."""
 
+    WAVE_DELAY = 8  # action steps between waves (0-rock state the agent must learn to idle through)
+
     def __init__(self, num_rocks=1):
         self.num_rocks = num_rocks
         self.wave_rocks = num_rocks
@@ -361,6 +363,7 @@ class AsteroidsEnv:
         self.alive = True
         self.shoot_cooldown = 0
         self.waves_cleared_this_ep = 0
+        self.wave_delay_remaining = 0
 
     def reset(self):
         self.wave_rocks = self.num_rocks
@@ -374,6 +377,7 @@ class AsteroidsEnv:
         self.alive = True
         self.shoot_cooldown = 0
         self.waves_cleared_this_ep = 0
+        self.wave_delay_remaining = 0
         return build_observation(self.ship, self.rocks, self.bullets, self.shoot_cooldown,
                                  self.wave_rocks, self.waves_cleared_this_ep)
 
@@ -520,7 +524,8 @@ class AsteroidsEnv:
         )
         reward += 0.02 * max(0.0, 1.0 - dist_to_center / 400.0)
 
-        if len(self.rocks) == 0:
+        # Wave cleared — delay before spawning next wave so agent learns to idle
+        if len(self.rocks) == 0 and self.wave_delay_remaining <= 0:
             self.waves_cleared_this_ep += 1
             reward += 8.0 * self.wave_rocks
             dist_to_center = torus_dist(
@@ -530,8 +535,14 @@ class AsteroidsEnv:
             _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
             reward += 3.0 * max(0.0, 1.0 - _speed / 8.0)
             self.wave_rocks = min(self.wave_rocks + 1, self.num_rocks + 1)
-            for _ in range(self.wave_rocks):
-                self._spawn_big_rock()
+            self.wave_delay_remaining = self.WAVE_DELAY
+        elif len(self.rocks) == 0 and self.wave_delay_remaining > 0:
+            self.wave_delay_remaining -= 1
+            _speed = sqrt(self.ship.dx ** 2 + self.ship.dy ** 2)
+            reward += 0.05 * max(0.0, 1.0 - _speed / 2.0)
+            if self.wave_delay_remaining <= 0:
+                for _ in range(self.wave_rocks):
+                    self._spawn_big_rock()
 
         # Penalize shooting while spinning: deliberate aiming requires stopping rotation.
         if shot_fired:
@@ -767,9 +778,9 @@ def train(num_episodes=50000, save_every=100, model_path="ppo_model.pt"):
         with torch.no_grad():
             _, boot_val = net.forward(torch.tensor(state, device=device).unsqueeze(0))
         buffer.compute_gae(boot_val.item())
-        frac = min(1.0, total_steps / 8_000_000)
+        frac = min(1.0, total_steps / 80_000_000)
         for pg in optimizer.param_groups:
-            pg['lr'] = LR * (1.0 - 0.8 * frac)
+            pg['lr'] = LR * (1.0 - 0.7 * frac)
         cur_ent_coef = ENT_COEF * (1.0 - 0.5 * frac)
         ppo_update(net, optimizer, buffer, device, ent_coef=cur_ent_coef)
         update += 1
@@ -886,6 +897,8 @@ def watch(model_path="ppo_model.pt"):
     action_frames_left  = 0
     thrust = left = right = False
     fire_this_frame = False
+    wave_rocks      = num_rocks
+    waves_cleared   = 0
 
     while True:
         dt = fpsClock.tick(FPS) * REFERENCE_FPS / 1000.0
@@ -900,10 +913,10 @@ def watch(model_path="ppo_model.pt"):
 
         if action_frames_left <= 0:
             s, rs, bs = build_sim_state(ship, rocks, bullets)
-            obs = build_observation(s, rs, bs, shoot_cooldown)
+            obs = build_observation(s, rs, bs, shoot_cooldown, wave_rocks, waves_cleared)
             with torch.no_grad():
                 logits, _ = net.forward(torch.tensor(obs, device=device).unsqueeze(0))
-            action_idx = torch.distributions.Categorical(logits=logits).sample().item()
+            action_idx = logits.argmax(dim=1).item()
             thrust, left, right, shoot = ACTIONS[action_idx]
             action_frames_left = SIM_STEPS_PER_ACTION
 
@@ -947,13 +960,17 @@ def watch(model_path="ppo_model.pt"):
             action_frames_left = 0
             thrust = left = right = False
             fire_this_frame = False
+            wave_rocks    = num_rocks
+            waves_cleared = 0
 
         Score.draw(screen, rocks)
         textBlit(screen, "PPO Agent", "Arial", 30, BLUE,
                  "bottomleft", winWidth / 20, 18 * winHeight / 20, False)
 
         if len(rocks) == 0:
+            waves_cleared += 1
             num_rocks += 1
+            wave_rocks = num_rocks
             bullets.empty()
             pygame.event.clear()
             while len(rocks) < num_rocks:
