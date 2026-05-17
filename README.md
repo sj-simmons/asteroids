@@ -1,5 +1,7 @@
 # asteroids
 
+Update: Various AI players were added while teaching Drury's Artificial Intelligence in Spring 2026.
+
 This version of the classic game, Asteroids, was largely live-coded for a game design course taught in Shanghai in Spring
 2015.  The students in that course had varying degrees of coding experience.  The game runs in Python3 using
 [pygame](https://www.pygame.org/wiki/GettingStarted).
@@ -24,7 +26,7 @@ user@host:~$ cd asteroids
 user@host:~$ python3 asteroids.py
 ```
 
-### Detailed notes for running this in Windows 10
+### Detailed notes for running this in Windows 10 (this is older and may require modification)
 
 ... using natively installed Python3; alternatively, you could also
 run this in the [Windows Subsystem for Linux](https://docs.microsoft.com/en-us/windows/wsl/) (if you install an X-xserver).
